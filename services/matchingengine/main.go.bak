@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	MAX_ORDERS_PER_SIDE = 100000 // orders per side (buy/sell)
-	MAX_TOTAL_ORDERS    = 200000 // Total orders per symbol
-	MAX_SYMBOLS         = 1000   // Maximum symbols supported
+	MAX_ORDERS_PER_SIDE = 10000 // 10K orders per side (buy/sell)
+	MAX_TOTAL_ORDERS    = 20000 // Total orders per symbol
+	MAX_SYMBOLS         = 1000  // Maximum symbols supported
 )
 
 func main() {
@@ -66,12 +66,12 @@ type MatchingEngine struct {
 	kafkaWriter *kafka.Writer
 
 	// Object pools for zero-allocation matching
-	//tradePool sync.Pool
-	//slicePool sync.Pool
+	tradePool sync.Pool
+	slicePool sync.Pool
 
 	// Worker pools for async processing
-	//persistWorkers []chan PersistenceTask
-	//workerCount    int
+	persistWorkers []chan PersistenceTask
+	workerCount    int
 
 	// Shutdown coordination
 	shutdownCh chan struct{}
@@ -133,15 +133,70 @@ func NewMatchingEngine(redisAddr, kafkaBroker string) *MatchingEngine {
 	obm := NewOrderBookManager(rdb, writer, persistWorkers)
 
 	engine := &MatchingEngine{
-		orderBooks:  obm,
-		kafkaReader: reader,
-		kafkaWriter: writer,
-		//workerCount:    workerCount,
-		//persistWorkers: persistWorkers,
-		shutdownCh: make(chan struct{}),
+		orderBooks:     obm,
+		kafkaReader:    reader,
+		kafkaWriter:    writer,
+		workerCount:    workerCount,
+		persistWorkers: persistWorkers,
+		shutdownCh:     make(chan struct{}),
 	}
 
+	engine.initObjectPools()
+	engine.startPersistenceWorkers()
+
 	return engine
+}
+
+func (me *MatchingEngine) initObjectPools() {
+	me.tradePool = sync.Pool{
+		New: func() interface{} {
+			return &shared.Trade{}
+		},
+	}
+
+	me.slicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]*shared.Trade, 0, 50)
+		},
+	}
+}
+
+func (me *MatchingEngine) startPersistenceWorkers() {
+	for i := 0; i < me.workerCount; i++ {
+		me.wg.Add(1)
+		go me.persistenceWorker(i, me.persistWorkers[i])
+	}
+}
+
+func (me *MatchingEngine) persistenceWorker(workerID int, taskChan chan PersistenceTask) {
+	defer me.wg.Done()
+
+	batch := make([]PersistenceTask, 0, 1000)
+	ticker := time.NewTicker(1 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-me.shutdownCh:
+			if len(batch) > 0 {
+				me.flushBatch(batch)
+			}
+			return
+
+		case task := <-taskChan:
+			batch = append(batch, task)
+			if len(batch) >= 1000 {
+				me.flushBatch(batch)
+				batch = batch[:0]
+			}
+
+		case <-ticker.C:
+			if len(batch) > 0 {
+				me.flushBatch(batch)
+				batch = batch[:0]
+			}
+		}
+	}
 }
 
 func (me *MatchingEngine) flushBatch(batch []PersistenceTask) {
@@ -257,27 +312,27 @@ func (me *MatchingEngine) processOrderEvent(event shared.OrderEvent) {
 // ==============================================
 
 type OrderBookManager struct {
-	books         map[string]*OrderBook
-	mutex         sync.RWMutex
-	redisClient   *redis.Client
-	kafkaWriter   *kafka.Writer
-	statusManager *OrderStatusManager
-	//persistWorkers []chan PersistenceTask
-	//workerCount    int
-	totalSymbols int
-	maxSymbols   int
+	books          map[string]*OrderBook
+	mutex          sync.RWMutex
+	redisClient    *redis.Client
+	kafkaWriter    *kafka.Writer
+	statusManager  *OrderStatusManager
+	persistWorkers []chan PersistenceTask
+	workerCount    int
+	totalSymbols   int
+	maxSymbols     int
 }
 
 func NewOrderBookManager(redisClient *redis.Client, kafkaWriter *kafka.Writer, persistWorkers []chan PersistenceTask) *OrderBookManager {
 	return &OrderBookManager{
-		books:         make(map[string]*OrderBook, MAX_SYMBOLS),
-		redisClient:   redisClient,
-		kafkaWriter:   kafkaWriter,
-		statusManager: NewOrderStatusManager(redisClient, kafkaWriter),
-		//persistWorkers: persistWorkers,
-		//workerCount:    len(persistWorkers),
-		totalSymbols: 0,
-		maxSymbols:   MAX_SYMBOLS,
+		books:          make(map[string]*OrderBook, MAX_SYMBOLS),
+		redisClient:    redisClient,
+		kafkaWriter:    kafkaWriter,
+		statusManager:  NewOrderStatusManager(redisClient, kafkaWriter),
+		persistWorkers: persistWorkers,
+		workerCount:    len(persistWorkers),
+		totalSymbols:   0,
+		maxSymbols:     MAX_SYMBOLS,
 	}
 }
 
@@ -298,8 +353,8 @@ func (obm *OrderBookManager) GetOrderBook(symbol string) (*OrderBook, error) {
 		return book, nil
 	}
 
-	buyHeap := &OrderHeap{orders: make([]*shared.Order, 0, MAX_ORDERS_PER_SIDE), isBuy: true}
-	sellHeap := &OrderHeap{orders: make([]*shared.Order, 0, MAX_ORDERS_PER_SIDE), isBuy: false}
+	buyHeap := &OrderHeap{orders: make([]*shared.Order, MAX_ORDERS_PER_SIDE), isBuy: true}
+	sellHeap := &OrderHeap{orders: make([]*shared.Order, MAX_ORDERS_PER_SIDE), isBuy: false}
 	heap.Init(buyHeap)
 	heap.Init(sellHeap)
 
@@ -311,7 +366,7 @@ func (obm *OrderBookManager) GetOrderBook(symbol string) (*OrderBook, error) {
 		TotalOrders:      0,
 	}
 
-	//obm.restoreOrderBookFromRedis(book)
+	obm.restoreOrderBookFromRedis(book)
 	obm.books[symbol] = book
 	obm.totalSymbols++
 
@@ -326,9 +381,44 @@ func (obm *OrderBookManager) ProcessOrder(order *shared.Order) ([]*shared.Trade,
 	}
 
 	book.mutex.Lock()
-	trades, _ := book.Match(order, obm)
+	trades, ordersToUpdate := book.Match(order, obm)
 	book.mutex.Unlock()
 
+	if len(trades) > 0 || order.OrderStatus == shared.PENDING {
+		workerID := int(obm.hashOrder(order)) % obm.workerCount
+
+		for _, trade := range trades {
+			select {
+			case obm.persistWorkers[workerID] <- PersistenceTask{"TRADE", trade, order.Symbol}:
+			default:
+				log.Printf("Warning: Persistence queue full for worker %d", workerID)
+			}
+		}
+
+		if order.OrderStatus == shared.PENDING && order.RemainingQty > 0 {
+			select {
+			case obm.persistWorkers[workerID] <- PersistenceTask{"ORDER_UPDATE", order, order.Symbol}:
+			default:
+				log.Printf("Warning: Persistence queue full for order update")
+			}
+		}
+
+		if order.OrderStatus == shared.COMPLETE || order.RemainingQty < order.OriginalQty {
+			select {
+			case obm.persistWorkers[workerID] <- PersistenceTask{"ORDER_STATUS", order, order.Symbol}:
+			default:
+				log.Printf("Warning: Persistence queue full for status update")
+			}
+		}
+
+		for _, orderToUpdate := range ordersToUpdate {
+			select {
+			case obm.persistWorkers[workerID] <- PersistenceTask{"ORDER_STATUS", orderToUpdate, orderToUpdate.Symbol}:
+			default:
+				log.Printf("Warning: Persistence queue full for matched order status")
+			}
+		}
+	}
 	return trades, nil
 }
 
@@ -466,7 +556,7 @@ func (ob *OrderBook) matchBuyOrder(order *shared.Order, obm *OrderBookManager) (
 			Qty:         fillQty,
 			BuyOrderID:  order.ID,
 			SellOrderID: sellOrder.ID,
-			MakerSide:   shared.SELL,
+			MakerSide:   string(shared.SELL),
 			Timestamp:   time.Now(),
 			BuyUserID:   order.UserID,
 			SellUserID:  sellOrder.UserID,
@@ -513,7 +603,7 @@ func (ob *OrderBook) matchSellOrder(order *shared.Order, obm *OrderBookManager) 
 			Qty:         fillQty,
 			BuyOrderID:  buyOrder.ID,
 			SellOrderID: order.ID,
-			MakerSide:   shared.BUY,
+			MakerSide:   string(shared.BUY),
 			Timestamp:   time.Now(),
 			BuyUserID:   buyOrder.UserID,
 			SellUserID:  order.UserID,
@@ -762,12 +852,10 @@ func (obm *OrderBookManager) removeOrderFromRedis(symbol, side, orderID string) 
 	return obm.redisClient.ZRem(ctx, key, orderID).Err()
 }
 
-func (obm *OrderBookManager) restoreOrderBookFromRedis(symbol string) error {
+func (obm *OrderBookManager) restoreOrderBookFromRedis(book *OrderBook) error {
 	ctx := context.Background()
-	buyKey := fmt.Sprintf("orderbook:%s:buy", symbol)
-	sellKey := fmt.Sprintf("orderbook:%s:sell", symbol)
-
-	book, _ := obm.GetOrderBook(symbol)
+	buyKey := fmt.Sprintf("orderbook:%s:buy", book.Symbol)
+	sellKey := fmt.Sprintf("orderbook:%s:sell", book.Symbol)
 
 	buyData, err := obm.redisClient.Get(ctx, buyKey).Result()
 	if err == nil {
@@ -856,7 +944,7 @@ func (obm *OrderBookManager) getTradeFromRedis(tradeID string) (*shared.Trade, e
 		Qty:         qty,
 		BuyOrderID:  tradeData["buy_order_id"],
 		SellOrderID: tradeData["sell_order_id"],
-		MakerSide:   shared.Side(tradeData["maker_side"]),
+		MakerSide:   tradeData["maker_side"],
 		Timestamp:   time.Unix(timestampUnix, 0),
 		BuyUserID:   tradeData["buy_user_id"],
 		SellUserID:  tradeData["sell_user_id"],

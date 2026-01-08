@@ -58,10 +58,10 @@ type Trade struct {
 	Timestamp   time.Time `json:"timestamp"`
 	BuyOrderID  string    `json:"buy_order_id"`
 	SellOrderID string    `json:"sell_order_id"`
-	MakerSide   string    `json:"maker_side"`
-
-	BuyUserID  string `json:"buy_user_id"`
-	SellUserID string `json:"sell_user_id"`
+	MakerSide   Side      `json:"maker_side"`
+	TakerSide   Side      `json:"taker_side"`
+	BuyUserID   string    `json:"buy_user_id"`
+	SellUserID  string    `json:"sell_user_id"`
 }
 
 type OrderEvent struct {

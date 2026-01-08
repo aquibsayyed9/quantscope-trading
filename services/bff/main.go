@@ -462,7 +462,7 @@ func (bff *BFF) getRecentTradesFromRedis(symbol string, limit int) ([]*shared.Ma
 		json.Unmarshal([]byte(data), &trade)
 		trades = append(trades, &shared.MarketTrades{
 			ID: trade.ID, Symbol: trade.Symbol, Price: trade.Price,
-			Quantity: trade.Qty, Side: trade.MakerSide, Timestamp: trade.Timestamp,
+			Quantity: trade.Qty, Side: string(trade.MakerSide), Timestamp: trade.Timestamp,
 		})
 	}
 	return trades, nil
