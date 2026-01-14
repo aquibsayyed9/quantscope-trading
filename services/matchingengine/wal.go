@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -12,10 +13,12 @@ import (
 )
 
 type WAL struct {
-	file     *os.File
-	writer   *bufio.Writer
-	mutex    sync.Mutex
-	sequence uint64
+	baseDir     string
+	file        *os.File
+	writer      *bufio.Writer
+	mutex       sync.Mutex
+	sequence    uint64
+	currentSize int64
 
 	flushTicker *time.Ticker
 	stopFlush   chan struct{}
@@ -23,6 +26,8 @@ type WAL struct {
 
 	entriesWritten uint64
 	bytesWritten   uint64
+
+	rotationSeq int
 }
 
 const (
@@ -30,15 +35,31 @@ const (
 	EntryTypeTrade = 2
 )
 
-func NewWAL(fileName string, bufferSize int, flushInterval time.Duration) (*WAL, error) {
-	file, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+const MAX_WAL_SIZE = 100 * 1024 * 1024 // 100 mb file size
+
+func NewWAL(baseDir string, bufferSize int, flushInterval time.Duration) (*WAL, error) {
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create WAL directory: %w", err)
+	}
+
+	walPath := filepath.Join(baseDir, "wal.log")
+
+	file, err := os.OpenFile(walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open WAL: %w", err)
 	}
 
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+
 	wal := &WAL{
+		baseDir:     baseDir,
 		file:        file,
 		writer:      bufio.NewWriterSize(file, bufferSize),
+		currentSize: info.Size(),
 		sequence:    0,
 		flushTicker: time.NewTicker(flushInterval),
 		stopFlush:   make(chan struct{}),
@@ -49,6 +70,46 @@ func NewWAL(fileName string, bufferSize int, flushInterval time.Duration) (*WAL,
 	go wal.backgroundFlusher()
 
 	return wal, nil
+}
+
+func (w *WAL) rotateWAL() error {
+
+	if err := w.writer.Flush(); err != nil {
+		return err
+	}
+	if err := w.file.Sync(); err != nil {
+		return err
+	}
+	if err := w.file.Close(); err != nil {
+		return err
+	}
+
+	nextSeq := w.rotationSeq + 1
+	newFileName := fmt.Sprintf("wal_%06d.log", nextSeq)
+	currentPath := filepath.Join(w.baseDir, "wal.log")
+	newPath := filepath.Join(w.baseDir, newFileName)
+	if err := os.Rename(currentPath, newPath); err != nil {
+		return err
+	}
+
+	file, err := os.Create("wal.log")
+	if err != nil {
+		return err
+	}
+
+	w.file = file
+	w.writer = bufio.NewWriter(file)
+	w.rotationSeq = nextSeq
+	w.currentSize = 0
+
+	return nil
+}
+
+func (w *WAL) checkRotation() error {
+	if w.currentSize >= MAX_WAL_SIZE {
+		return w.rotateWAL()
+	}
+	return nil
 }
 
 func (w *WAL) backgroundFlusher() {
@@ -113,6 +174,10 @@ func (w *WAL) WriteEntry(entryType byte, payload []byte) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
+	if err := w.checkRotation(); err != nil {
+		return err
+	}
+
 	w.sequence++
 	seq := w.sequence
 
@@ -141,6 +206,9 @@ func (w *WAL) WriteEntry(entryType byte, payload []byte) error {
 	if _, err := w.writer.Write(checksumBytes); err != nil {
 		return fmt.Errorf("failed to write checksum: %w", err)
 	}
+
+	entrySize := int64(headerSize + len(payload) + 4)
+	w.currentSize += entrySize
 
 	return nil
 }

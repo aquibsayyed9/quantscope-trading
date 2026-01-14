@@ -31,9 +31,16 @@ const (
 func main() {
 	log.Println("Starting Matching Engine...")
 
+	wal, err := NewWAL("./wal", 4*1024*1024, 10*time.Millisecond)
+	if err != nil {
+		log.Fatal("Error creating WAL: ", err)
+	}
+	defer wal.Close()
+
 	engine := NewMatchingEngine(
 		getEnv("REDIS_ADDR", "redis:6379"),
 		getEnv("KAFKA_BROKER", "kafka:9092"),
+		wal,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -84,7 +91,7 @@ type PersistenceTask struct {
 	Symbol string
 }
 
-func NewMatchingEngine(redisAddr, kafkaBroker string) *MatchingEngine {
+func NewMatchingEngine(redisAddr, kafkaBroker string, wal *WAL) *MatchingEngine {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         redisAddr,
 		PoolSize:     200,
@@ -130,7 +137,7 @@ func NewMatchingEngine(redisAddr, kafkaBroker string) *MatchingEngine {
 		persistWorkers[i] = make(chan PersistenceTask, 10000)
 	}
 
-	obm := NewOrderBookManager(rdb, writer, persistWorkers)
+	obm := NewOrderBookManager(rdb, writer, persistWorkers, wal)
 
 	engine := &MatchingEngine{
 		orderBooks:  obm,
@@ -266,9 +273,10 @@ type OrderBookManager struct {
 	//workerCount    int
 	totalSymbols int
 	maxSymbols   int
+	wal          *WAL
 }
 
-func NewOrderBookManager(redisClient *redis.Client, kafkaWriter *kafka.Writer, persistWorkers []chan PersistenceTask) *OrderBookManager {
+func NewOrderBookManager(redisClient *redis.Client, kafkaWriter *kafka.Writer, persistWorkers []chan PersistenceTask, wal *WAL) *OrderBookManager {
 	return &OrderBookManager{
 		books:         make(map[string]*OrderBook, MAX_SYMBOLS),
 		redisClient:   redisClient,
@@ -278,6 +286,7 @@ func NewOrderBookManager(redisClient *redis.Client, kafkaWriter *kafka.Writer, p
 		//workerCount:    len(persistWorkers),
 		totalSymbols: 0,
 		maxSymbols:   MAX_SYMBOLS,
+		wal:          wal,
 	}
 }
 
@@ -325,6 +334,10 @@ func (obm *OrderBookManager) ProcessOrder(order *shared.Order) ([]*shared.Trade,
 		return nil, fmt.Errorf("failed to get order book: %w", err)
 	}
 
+	if err = obm.wal.AppendOrder(order); err != nil {
+		return nil, err
+	}
+
 	book.mutex.Lock()
 	trades, _ := book.Match(order, obm)
 	book.mutex.Unlock()
@@ -347,7 +360,7 @@ func (obm *OrderBookManager) CancelOrder(orderID, symbol string) error {
 			book.BuyOrders.orders = append(book.BuyOrders.orders[:i], book.BuyOrders.orders[i+1:]...)
 			heap.Init(book.BuyOrders)
 			book.TotalOrders--
-			go obm.removeOrderFromRedis(symbol, string(shared.BUY), orderID)
+			//go obm.removeOrderFromRedis(symbol, string(shared.BUY), orderID)
 			return nil
 		}
 	}
@@ -358,7 +371,7 @@ func (obm *OrderBookManager) CancelOrder(orderID, symbol string) error {
 			book.SellOrders.orders = append(book.SellOrders.orders[:i], book.SellOrders.orders[i+1:]...)
 			heap.Init(book.SellOrders)
 			book.TotalOrders--
-			go obm.removeOrderFromRedis(symbol, string(shared.SELL), orderID)
+			//go obm.removeOrderFromRedis(symbol, string(shared.SELL), orderID)
 			return nil
 		}
 	}

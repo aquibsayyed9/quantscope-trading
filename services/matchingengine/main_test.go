@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"go-exchange/shared"
+	//"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,9 +13,18 @@ import (
 
 func TestRawMatchingOutput(t *testing.T) {
 
+	// Create WAL
+	wal, err := NewWAL("./test-wal", 4*1024*1024, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wal.Close()
+	//defer os.RemoveAll("./test-wal")
+
 	obm := &OrderBookManager{
 		books:      make(map[string]*OrderBook),
 		maxSymbols: 100,
+		wal:        wal,
 	}
 
 	//var buyOrders []*shared.Order
