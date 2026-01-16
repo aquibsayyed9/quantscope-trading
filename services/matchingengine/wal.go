@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
+	"go-exchange/shared"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
-
-	"go-exchange/shared"
 )
 
 type WAL struct {
@@ -28,6 +29,12 @@ type WAL struct {
 	bytesWritten   uint64
 
 	rotationSeq int
+}
+
+type WALEntry struct {
+	Type     byte
+	Sequence uint64
+	Payload  []byte
 }
 
 const (
@@ -70,6 +77,48 @@ func NewWAL(baseDir string, bufferSize int, flushInterval time.Duration) (*WAL, 
 	go wal.backgroundFlusher()
 
 	return wal, nil
+}
+
+func (w *WAL) ReadCurrentFile() ([]*shared.Order, []*shared.Trade, error) {
+
+	walPath := filepath.Join(w.baseDir, "wal.log")
+
+	// Open the file
+	file, err := os.Open(walPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No file = no recovery needed
+			return []*shared.Order{}, []*shared.Trade{}, nil
+		}
+		return nil, nil, fmt.Errorf("failed to open WAL: %w", err)
+	}
+	defer file.Close()
+
+	var orders []*shared.Order
+	var trades []*shared.Trade
+
+	reader := bufio.NewReader(file)
+
+	for {
+		entry, err := w.ReadEntry(reader)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("Skipping corrupted entry: %v", err)
+			continue
+		}
+
+		switch entry.Type {
+		case EntryTypeOrder:
+			orders = append(orders, deserializeOrder(entry.Payload))
+		case EntryTypeTrade:
+			trades = append(trades, deserializeTrade(entry.Payload))
+		default:
+			log.Printf("Skipping unknown entry type: %d", entry.Type)
+		}
+	}
+	return orders, trades, nil
 }
 
 func (w *WAL) rotateWAL() error {
@@ -170,6 +219,44 @@ func (w *WAL) AppendTrade(trade *shared.Trade) error {
 	return w.WriteEntry(EntryTypeTrade, data)
 }
 
+func (w *WAL) ReadEntry(reader *bufio.Reader) (*WALEntry, error) {
+	header := make([]byte, 13)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return nil, err
+	}
+
+	totalLength := binary.LittleEndian.Uint32(header[0:4])
+	sequence := binary.LittleEndian.Uint64(header[4:12])
+	entryType := header[12]
+
+	// payload
+	payloadSize := totalLength - 13 - 4
+
+	payload := make([]byte, payloadSize)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		return nil, err
+	}
+
+	// checksum
+	checksumBytes := make([]byte, 4)
+	if _, err := io.ReadFull(reader, checksumBytes); err != nil {
+		return nil, err
+	}
+
+	// verify checksum
+	expectedChecksum := binary.LittleEndian.Uint32(checksumBytes)
+	actualChecksum := calculateChecksum(payload)
+	if expectedChecksum != actualChecksum {
+		return nil, fmt.Errorf("checksum mismatch: expected %d, got %d", expectedChecksum, actualChecksum)
+	}
+
+	return &WALEntry{
+		Type:     entryType,
+		Sequence: sequence,
+		Payload:  payload,
+	}, nil
+}
+
 func (w *WAL) WriteEntry(entryType byte, payload []byte) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
@@ -211,6 +298,26 @@ func (w *WAL) WriteEntry(entryType byte, payload []byte) error {
 	w.currentSize += entrySize
 
 	return nil
+}
+
+func (w *WAL) ReadCurrentFile() ([]*WALEntry, error) {
+	walPath := filepath.Join(w.baseDir, "wal.log")
+
+	file, err := os.Open(walPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []*WALEntry{}, nil
+		}
+	}
+	defer file.Close()
+
+	var entries []*WALEntry
+	reader := bufio.NewReader(file)
+
+	for {
+		// header size is 13 as used previously
+		header := make([]byte, 13)
+	}
 }
 
 // simple checksum (FNV-1a hash)

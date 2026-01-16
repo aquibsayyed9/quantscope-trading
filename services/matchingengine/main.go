@@ -139,6 +139,12 @@ func NewMatchingEngine(redisAddr, kafkaBroker string, wal *WAL) *MatchingEngine 
 
 	obm := NewOrderBookManager(rdb, writer, persistWorkers, wal)
 
+	log.Print("starting recovery from WAL...")
+	if err := obm.RecoverFromWAL(); err != nil {
+		log.Fatal("Recovery failed: %v", err)
+	}
+	log.Print("recovery complete")
+
 	engine := &MatchingEngine{
 		orderBooks:  obm,
 		kafkaReader: reader,
@@ -334,15 +340,88 @@ func (obm *OrderBookManager) ProcessOrder(order *shared.Order) ([]*shared.Trade,
 		return nil, fmt.Errorf("failed to get order book: %w", err)
 	}
 
+	// 1. write new order to wal
 	if err = obm.wal.AppendOrder(order); err != nil {
 		return nil, err
 	}
 
 	book.mutex.Lock()
+	defer book.mutex.Unlock()
+	// 2. match order in-memory
 	trades, _ := book.Match(order, obm)
-	book.mutex.Unlock()
+
+	// 3. write trade generated to wal
+	for _, trade := range trades {
+		if err = obm.wal.AppendTrade(trade); err != nil {
+			log.Fatal("WAL write failed after in-memory modification - forcing restart for recovery")
+		}
+	}
 
 	return trades, nil
+}
+
+func (obm *OrderBookManager) RecoverFromWAL() error {
+	orders, trades, err := obm.wal.ReadCurrentFile()
+	if err != nil {
+		return err
+	}
+
+	if len(orders) == 0 && len(trades) == 0 {
+		log.Print("No WAL entries to recover")
+	}
+
+	log.Printf("Recovering %d orders and %d trades", len(orders), len(trades))
+
+	orderMap := make(map[string]*shared.Order)
+	for _, order := range orders {
+		orderMap[order.ID] = order
+	}
+
+	for _, trade := range trades {
+		if buyOrder := orderMap[trade.BuyOrderID]; buyOrder != nil {
+			buyOrder.RemainingQty -= trade.Qty
+			if buyOrder.RemainingQty == 0 {
+				buyOrder.OrderStatus = shared.COMPLETE
+
+			} else {
+				buyOrder.OrderStatus = shared.PARTIALLY_FILLED
+			}
+		}
+
+		if sellOrder := orderMap[trade.SellOrderID]; sellOrder != nil {
+			sellOrder.RemainingQty -= trade.Qty
+			if sellOrder.RemainingQty == 0 {
+				sellOrder.OrderStatus = shared.COMPLETE
+			} else {
+				sellOrder.OrderStatus = shared.PARTIALLY_FILLED
+			}
+		}
+	}
+
+	symbolOrders := make(map[string][]*shared.Order)
+	for _, order := range orderMap {
+		if order.OrderStatus != shared.COMPLETE {
+			symbolOrders[order.Symbol] = append(symbolOrders[order.Symbol], order)
+		}
+	}
+
+	for symbol, orders := range symbolOrders {
+		book, _ := obm.GetOrderBook(symbol)
+
+		book.mutex.Lock()
+		for _, order := range orders {
+			if order.Side == shared.BUY {
+				heap.Push(book.BuyOrders, order)
+			} else {
+				heap.Push(book.SellOrders, order)
+			}
+			book.TotalOrders++
+		}
+		book.mutex.Unlock()
+	}
+
+	log.Print("Recovery complete")
+	return nil
 }
 
 func (obm *OrderBookManager) CancelOrder(orderID, symbol string) error {
