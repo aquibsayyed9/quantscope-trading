@@ -29,11 +29,11 @@ type NotificationManager struct {
 }
 
 type Notification struct {
-	Type      string                 `json:"type"`
-	UserID    string                 `json:"user_id"`
-	Message   string                 `json:"message"`
-	Data      map[string]interface{} `json:"data"`
-	Timestamp time.Time              `json:"timestamp"`
+	Type      string         `json:"type"`
+	UserID    string         `json:"user_id"`
+	Message   string         `json:"message"`
+	Data      map[string]any `json:"data"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 func NewNotificationManager() *NotificationManager {

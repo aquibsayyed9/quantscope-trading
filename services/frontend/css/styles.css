@@ -1,0 +1,272 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    line-height: 1.6;
+}
+
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 30px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #30363d;
+}
+
+header h1 {
+    font-size: 24px;
+    font-weight: 600;
+}
+
+.user-selector {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.user-selector label {
+    font-size: 14px;
+    color: #8b949e;
+}
+
+.trading-grid {
+    display: grid;
+    grid-template-columns: 350px 1fr 300px;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+
+.card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 20px;
+}
+
+.card h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    color: #c9d1d9;
+}
+
+/* Order Form */
+.form-group {
+    margin-bottom: 16px;
+}
+
+.form-group label {
+    display: block;
+    font-size: 13px;
+    margin-bottom: 6px;
+    color: #8b949e;
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+input, select {
+    width: 100%;
+    padding: 8px 12px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-size: 14px;
+}
+
+input:focus, select:focus {
+    outline: none;
+    border-color: #58a6ff;
+}
+
+.btn-primary {
+    width: 100%;
+    padding: 10px;
+    background: #238636;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 10px;
+}
+
+.btn-primary:hover {
+    background: #2ea043;
+}
+
+.status-message {
+    margin-top: 12px;
+    padding: 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    text-align: center;
+}
+
+.status-message.success {
+    background: #1a2f1a;
+    border: 1px solid #238636;
+    color: #3fb950;
+}
+
+.status-message.error {
+    background: #2f1a1a;
+    border: 1px solid #da3633;
+    color: #f85149;
+}
+
+/* Order Book */
+.book-container {
+    font-size: 13px;
+}
+
+.book-header {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 8px 12px;
+    background: #0d1117;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #8b949e;
+}
+
+.asks-section, .bids-section {
+    margin-bottom: 12px;
+}
+
+.book-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 6px 12px;
+    border-radius: 3px;
+}
+
+.book-row:hover {
+    background: #0d1117;
+}
+
+.ask {
+    color: #f85149;
+}
+
+.bid {
+    color: #3fb950;
+}
+
+.spread {
+    text-align: center;
+    padding: 12px;
+    background: #0d1117;
+    border-radius: 4px;
+    margin: 12px 0;
+    font-size: 12px;
+    color: #8b949e;
+}
+
+/* Trades */
+.trades-header {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    padding: 8px 12px;
+    background: #0d1117;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #8b949e;
+    font-size: 12px;
+}
+
+.trade-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 3px;
+}
+
+.trade-row:hover {
+    background: #0d1117;
+}
+
+.trade-buy {
+    color: #3fb950;
+}
+
+.trade-sell {
+    color: #f85149;
+}
+
+/* User Orders */
+.user-orders {
+    grid-column: 1 / -1;
+}
+
+.orders-table {
+    width: 100%;
+    font-size: 13px;
+}
+
+.orders-table th {
+    text-align: left;
+    padding: 8px 12px;
+    background: #0d1117;
+    color: #8b949e;
+    font-weight: 600;
+}
+
+.orders-table td {
+    padding: 8px 12px;
+    border-top: 1px solid #30363d;
+}
+
+.status-badge {
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.status-new {
+    background: #1a2f3f;
+    color: #58a6ff;
+}
+
+.status-filled {
+    background: #1a2f1a;
+    color: #3fb950;
+}
+
+.status-partial {
+    background: #3f2f1a;
+    color: #d29922;
+}
+
+.status-cancelled {
+    background: #2f1a1a;
+    color: #f85149;
+}
+
+@media (max-width: 1200px) {
+    .trading-grid {
+        grid-template-columns: 1fr;
+    }
+}

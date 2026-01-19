@@ -300,26 +300,6 @@ func (w *WAL) WriteEntry(entryType byte, payload []byte) error {
 	return nil
 }
 
-func (w *WAL) ReadCurrentFile() ([]*WALEntry, error) {
-	walPath := filepath.Join(w.baseDir, "wal.log")
-
-	file, err := os.Open(walPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []*WALEntry{}, nil
-		}
-	}
-	defer file.Close()
-
-	var entries []*WALEntry
-	reader := bufio.NewReader(file)
-
-	for {
-		// header size is 13 as used previously
-		header := make([]byte, 13)
-	}
-}
-
 // simple checksum (FNV-1a hash)
 func calculateChecksum(data []byte) uint32 {
 	hash := uint32(2166136261)

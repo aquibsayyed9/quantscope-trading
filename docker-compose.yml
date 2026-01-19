@@ -52,6 +52,8 @@ services:
     environment:
       - KAFKA_BROKER=kafka:9092
       - GIN_MODE=release
+    volumes:
+      - ./services/frontend:/frontend
     depends_on:
       kafka:
         condition: service_healthy

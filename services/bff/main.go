@@ -79,6 +79,11 @@ func main() {
 	r.GET("/ticker/:symbol", bff.GetTicker)
 	r.GET("/ticker", bff.GetAllTickers)
 
+	// frontend files
+	r.Static("/css", "/frontend/css")
+	r.Static("/js", "/frontend/js")
+	r.StaticFile("/", "/frontend/index.html")
+
 	log.Println("BFF started on port 8080")
 
 	server := &http.Server{

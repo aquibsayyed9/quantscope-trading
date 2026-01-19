@@ -77,8 +77,8 @@ type MatchingEngine struct {
 	//slicePool sync.Pool
 
 	// Worker pools for async processing
-	//persistWorkers []chan PersistenceTask
-	//workerCount    int
+	persistWorkers []chan PersistenceTask
+	workerCount    int
 
 	// Shutdown coordination
 	shutdownCh chan struct{}
@@ -87,7 +87,7 @@ type MatchingEngine struct {
 
 type PersistenceTask struct {
 	Type   string
-	Data   interface{}
+	Data   any
 	Symbol string
 }
 
@@ -127,34 +127,70 @@ func NewMatchingEngine(redisAddr, kafkaBroker string, wal *WAL) *MatchingEngine 
 	})
 
 	// Initialize persistence workers
-	workerCount := runtime.NumCPU()
-	if workerCount < 4 {
-		workerCount = 4
-	}
+	workerCount := max(runtime.NumCPU(), 4)
 
 	persistWorkers := make([]chan PersistenceTask, workerCount)
 	for i := 0; i < workerCount; i++ {
-		persistWorkers[i] = make(chan PersistenceTask, 10000)
+		persistWorkers[i] = make(chan PersistenceTask, 1000)
 	}
 
 	obm := NewOrderBookManager(rdb, writer, persistWorkers, wal)
 
 	log.Print("starting recovery from WAL...")
 	if err := obm.RecoverFromWAL(); err != nil {
-		log.Fatal("Recovery failed: %v", err)
+		log.Fatalf("Recovery failed: %v", err)
 	}
 	log.Print("recovery complete")
 
 	engine := &MatchingEngine{
-		orderBooks:  obm,
-		kafkaReader: reader,
-		kafkaWriter: writer,
-		//workerCount:    workerCount,
-		//persistWorkers: persistWorkers,
-		shutdownCh: make(chan struct{}),
+		orderBooks:     obm,
+		kafkaReader:    reader,
+		kafkaWriter:    writer,
+		workerCount:    workerCount,
+		persistWorkers: persistWorkers,
+		shutdownCh:     make(chan struct{}),
 	}
+	engine.startPersistenceWorkers()
 
 	return engine
+}
+
+func (me *MatchingEngine) startPersistenceWorkers() {
+	for i := 0; i < me.workerCount; i++ {
+		me.wg.Add(1)
+		go me.persistenceWorker(i, me.persistWorkers[i])
+	}
+}
+
+func (me *MatchingEngine) persistenceWorker(workerID int, taskChan chan PersistenceTask) {
+	defer me.wg.Done()
+
+	batch := make([]PersistenceTask, 0, 1000)
+	ticker := time.NewTicker(1 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-me.shutdownCh:
+			if len(batch) > 0 {
+				me.flushBatch(batch)
+			}
+			return
+
+		case task := <-taskChan:
+			batch = append(batch, task)
+			if len(batch) >= 1000 {
+				me.flushBatch(batch)
+				batch = batch[:0]
+			}
+
+		case <-ticker.C:
+			if len(batch) > 0 {
+				me.flushBatch(batch)
+				batch = batch[:0]
+			}
+		}
+	}
 }
 
 func (me *MatchingEngine) flushBatch(batch []PersistenceTask) {
@@ -252,11 +288,11 @@ func (me *MatchingEngine) Start(ctx context.Context) {
 func (me *MatchingEngine) processOrderEvent(event shared.OrderEvent) {
 	switch event.Type {
 	case "NEW":
-		trades, err := me.orderBooks.ProcessOrder(event.Order)
+		trades, updatedOrders, err := me.orderBooks.ProcessOrder(event.Order)
 		if err != nil {
 			log.Printf("Error occurred while process order: %s", err)
 		}
-		log.Printf("Processed order %s, generated %d trades", event.Order.ID, len(trades))
+		log.Printf("Processed order %s, generated %d trades, updated %d orders", event.Order.ID, len(trades), len(updatedOrders))
 	case "CANCEL":
 		err := me.orderBooks.CancelOrder(event.Order.ID, event.Order.Symbol)
 		if err != nil {
@@ -270,29 +306,29 @@ func (me *MatchingEngine) processOrderEvent(event shared.OrderEvent) {
 // ==============================================
 
 type OrderBookManager struct {
-	books         map[string]*OrderBook
-	mutex         sync.RWMutex
-	redisClient   *redis.Client
-	kafkaWriter   *kafka.Writer
-	statusManager *OrderStatusManager
-	//persistWorkers []chan PersistenceTask
-	//workerCount    int
-	totalSymbols int
-	maxSymbols   int
-	wal          *WAL
+	books          map[string]*OrderBook
+	mutex          sync.RWMutex
+	redisClient    *redis.Client
+	kafkaWriter    *kafka.Writer
+	statusManager  *OrderStatusManager
+	persistWorkers []chan PersistenceTask
+	workerCount    int
+	totalSymbols   int
+	maxSymbols     int
+	wal            *WAL
 }
 
 func NewOrderBookManager(redisClient *redis.Client, kafkaWriter *kafka.Writer, persistWorkers []chan PersistenceTask, wal *WAL) *OrderBookManager {
 	return &OrderBookManager{
-		books:         make(map[string]*OrderBook, MAX_SYMBOLS),
-		redisClient:   redisClient,
-		kafkaWriter:   kafkaWriter,
-		statusManager: NewOrderStatusManager(redisClient, kafkaWriter),
-		//persistWorkers: persistWorkers,
-		//workerCount:    len(persistWorkers),
-		totalSymbols: 0,
-		maxSymbols:   MAX_SYMBOLS,
-		wal:          wal,
+		books:          make(map[string]*OrderBook, MAX_SYMBOLS),
+		redisClient:    redisClient,
+		kafkaWriter:    kafkaWriter,
+		statusManager:  NewOrderStatusManager(redisClient, kafkaWriter),
+		persistWorkers: persistWorkers,
+		workerCount:    len(persistWorkers),
+		totalSymbols:   0,
+		maxSymbols:     MAX_SYMBOLS,
+		wal:            wal,
 	}
 }
 
@@ -334,30 +370,45 @@ func (obm *OrderBookManager) GetOrderBook(symbol string) (*OrderBook, error) {
 	return book, nil
 }
 
-func (obm *OrderBookManager) ProcessOrder(order *shared.Order) ([]*shared.Trade, error) {
+func (obm *OrderBookManager) ProcessOrder(order *shared.Order) ([]*shared.Trade, []*shared.Order, error) {
 	book, err := obm.GetOrderBook(order.Symbol)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get order book: %w", err)
+		return nil, nil, fmt.Errorf("failed to get order book: %w", err)
 	}
 
 	// 1. write new order to wal
 	if err = obm.wal.AppendOrder(order); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	book.mutex.Lock()
 	defer book.mutex.Unlock()
 	// 2. match order in-memory
-	trades, _ := book.Match(order, obm)
+	trades, ordersToUpdate := book.Match(order, obm)
 
 	// 3. write trade generated to wal
 	for _, trade := range trades {
 		if err = obm.wal.AppendTrade(trade); err != nil {
 			log.Fatal("WAL write failed after in-memory modification - forcing restart for recovery")
 		}
+		workerIndex := obm.hashOrder(order) % uint32(len(obm.persistWorkers))
+		select {
+		case obm.persistWorkers[workerIndex] <- PersistenceTask{Type: "TRADE", Data: trade}:
+		default:
+			log.Printf("Worker %d queue full, dropping trade publish", workerIndex)
+		}
 	}
 
-	return trades, nil
+	for _, order := range ordersToUpdate {
+		workerIndex := obm.hashOrder(order) % uint32(len(obm.persistWorkers))
+		select {
+		case obm.persistWorkers[workerIndex] <- PersistenceTask{Type: "ORDER_UPDATE", Data: order}:
+		default:
+			log.Printf("Worker %d queue full, dropping order update publish", workerIndex)
+		}
+	}
+
+	return trades, ordersToUpdate, nil
 }
 
 func (obm *OrderBookManager) RecoverFromWAL() error {
@@ -582,6 +633,7 @@ func (ob *OrderBook) matchBuyOrder(order *shared.Order, obm *OrderBookManager) (
 	if err := ob.handleRemainingQuantity(order, obm); err != nil {
 		log.Printf("Warning: %v", err)
 	}
+	ordersToUpdate = append(ordersToUpdate, order)
 	return trades, ordersToUpdate
 }
 
@@ -629,6 +681,7 @@ func (ob *OrderBook) matchSellOrder(order *shared.Order, obm *OrderBookManager) 
 	if err := ob.handleRemainingQuantity(order, obm); err != nil {
 		log.Printf("Warning: %v", err)
 	}
+	ordersToUpdate = append(ordersToUpdate, order)
 	return trades, ordersToUpdate
 }
 
@@ -895,6 +948,21 @@ func (obm *OrderBookManager) publishTradeEvent(trade *shared.Trade) error {
 		Value: data,
 	}
 
+	return obm.kafkaWriter.WriteMessages(context.Background(), message)
+}
+
+func (obm *OrderBookManager) publishOrderUpdate(order *shared.Order) error {
+	event := shared.OrderEvent{
+		Type:      "ORDER_UPDATE",
+		Order:     order,
+		Timestamp: time.Now(),
+	}
+
+	data, _ := json.Marshal(event)
+	message := kafka.Message{
+		Key:   []byte(order.Symbol),
+		Value: data,
+	}
 	return obm.kafkaWriter.WriteMessages(context.Background(), message)
 }
 
